@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <title>Active Arena Matrix</title>
+</head>
+<body>
+    <div class="main-dashboard">
+        
+        <div class="left-panel">
+            <div class="turn-bar" id="turnIndicator">X Turn Active</div>
+            
+            <div class="game-grid-frame">
+                <canvas id="winCanvas" width="342" height="342"></canvas>
+                
+                <div class="grid-board">
+                    {% for i in range(9) %}
+                        <div class="grid-cell" id="cell-{{ i }}" onclick="processCellSelection({{ i }})">&nbsp;</div>
+                    {% endfor %}
+                </div>
+            </div>
+
+            <div class="ai-box" id="ragFeed">
+                🤖 Engine Analysis: Awaiting initial cell positioning data.
+            </div>
+        </div>
+
+        <div class="right-panel">
+            <h3>Match Tracking Matrix</h3>
+            <div class="scoreboard-vertical">
+                <div class="score-node">
+                    <span class="label">PLAYER (X)</span>
+                    <span id="valX" class="value">0</span>
+                </div>
+                <div class="score-node tie-node">
+                    <span class="label">DRAW TIES</span>
+                    <span id="valTie" class="value">0</span>
+                </div>
+                <div class="score-node">
+                    <span class="label">OPPONENT (O)</span>
+                    <span id="valO" class="value">0</span>
+                </div>
+            </div>
+
+            <div class="control-actions-vertical">
+                <button class="btn btn-primary" onclick="triggerGridReset()">Rematch Grid</button>
+                <a href="/" class="btn btn-secondary">Exit Terminal</a>
+            </div>
+        </div>
+
+    </div>
+
+    <div class="modal-overlay" id="endModal">
+        <div class="modal-content">
+            <h3 id="modalTitle">Analysis Completed</h3>
+            <p id="modalBody">Resolution vectors found.</p>
+            <div style="display:flex; gap:12px; justify-content:center;">
+                <button class="btn btn-primary" onclick="triggerGridReset()">Rematch</button>
+                <a href="/" class="btn btn-secondary">Exit</a>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let board = [" ", " ", " ", " ", " ", " ", " ", " ", " "];
+        let currentActiveToken = "X";
+        let isInterfaceLocked = false;
+        let scoreState = { X: 0, O: 0, Tie: 0 };
+        
+        const opponentMode = "{{ player_type }}";
+
+        // Hardcoded combinations index mapped directly to Canvas geometry configurations
+        const WIN_COMBOS = [
+            { combo: [0, 1, 2], line: [20, 57, 322, 57] },    // Row 0
+            { combo: [3, 4, 5], line: [20, 171, 322, 171] },  // Row 1
+            { combo: [6, 7, 8], line: [20, 285, 322, 285] },  // Row 2
+            { combo: [0, 3, 6], line: [57, 20, 57, 322] },    // Col 0
+            { combo: [1, 4, 7], line: [171, 20, 171, 322] },  // Col 1
+            { combo: [2, 5, 8], line: [285, 20, 285, 322] },  // Col 2
+            { combo: [0, 4, 8], line: [20, 20, 322, 322] },   // Diagonal Left -> Right
+            { combo: [2, 4, 6], line: [322, 20, 20, 322] }    // Diagonal Right -> Left
+        ];
+
+        function processCellSelection(index) {
+            if (board[index] !== " " || isInterfaceLocked) return;
+
+            board[index] = currentActiveToken;
+            renderDisplayValues();
+            isInterfaceLocked = true;
+
+            if (opponentMode === "local") {
+                executeResolutionVerification(false);
+                return;
+            }
+
+            document.getElementById("turnIndicator").innerText = "O Thinking...";
+            
+            fetch('/api/move', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ board: board })
+            })
+            .then(res => res.json())
+            .then(data => {
+                // Controlled AI move reflection pacing delay (600ms)
+                setTimeout(() => {
+                    board = data.board;
+                    renderDisplayValues();
+                    if (data.ai_commentary) {
+                        document.getElementById("ragFeed").innerText = "🤖 " + data.ai_commentary;
+                    }
+                    executeResolutionVerification(true, data.game_status);
+                }, 600);
+            });
+        }
+
+        function renderDisplayValues() {
+            board.forEach((val, idx) => {
+                const cell = document.getElementById(`cell-${idx}`);
+                cell.innerHTML = val !== " " ? val : "&nbsp;";
+                cell.className = `grid-cell ${val.trim()}`;
+            });
+        }
+
+        function executeResolutionVerification(isAiCall, inlineStatus = "") {
+            if (isAiCall) {
+                evaluateAndDrawWinLine(inlineStatus);
+            } else {
+                fetch('/api/move', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ board: board })
+                })
+                .then(res => res.json())
+                .then(data => {
+                    evaluateAndDrawWinLine(data.game_status);
+                });
+            }
+        }
+
+        function evaluateAndDrawWinLine(status) {
+            if (status === "X" || status === "O") {
+                // Scan matrix to detect the unique combination winning path configuration
+                for (let pattern of WIN_COMBOS) {
+                    const [a, b, c] = pattern.combo;
+                    if (board[a] === status && board[b] === status && board[c] === status) {
+                        drawStrikeLine(pattern.line, status, () => {
+                            // Secondary pacing gap (700ms) AFTER the line finishes rendering before the popup modal displays
+                            setTimeout(() => displayMatchSummary(status), 700);
+                        });
+                        return;
+                    }
+                }
+            } else if (status === "Tie") {
+                setTimeout(() => displayMatchSummary("Tie"), 600);
+            } else {
+                currentActiveToken = (opponentMode === "local") ? (currentActiveToken === "X" ? "O" : "X") : "X";
+                document.getElementById("turnIndicator").innerText = `${currentActiveToken} Turn Active`;
+                isInterfaceLocked = false;
+            }
+        }
+
+        function drawStrikeLine(coords, winner, callback) {
+            const canvas = document.getElementById("winCanvas");
+            const ctx = canvas.getContext("2d");
+            
+            ctx.strokeStyle = winner === "X" ? "#333d47" : "#f3f3f3";
+            ctx.lineWidth = 6;
+            ctx.lineCap = "round";
+            
+            let [startX, startY, endX, endY] = coords;
+            let currentX = startX;
+            let currentY = startY;
+            
+            // Linear mathematical interpolation variables step calculations
+            const totalSteps = 20; 
+            let currentStep = 0;
+            
+            const stepX = (endX - startX) / totalSteps;
+            const stepY = (endY - startY) / totalSteps;
+
+            function animateLine() {
+                if (currentStep <= totalSteps) {
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    ctx.beginPath();
+                    ctx.moveTo(startX, startY);
+                    ctx.lineTo(currentX, currentY);
+                    ctx.stroke();
+                    
+                    currentX += stepX;
+                    currentY += stepY;
+                    currentStep++;
+                    requestAnimationFrame(animateLine);
+                } else {
+                    if (callback) callback();
+                }
+            }
+            animateLine();
+        }
+
+        function displayMatchSummary(winnerToken) {
+            scoreState[winnerToken]++;
+            document.getElementById("valX").innerText = scoreState.X;
+            document.getElementById("valO").innerText = scoreState.O;
+            document.getElementById("valTie").innerText = scoreState.Tie;
+
+            document.getElementById("modalTitle").innerText = winnerToken === "Tie" ? "Grid Draw Tie" : `Victory: ${winnerToken}`;
+            document.getElementById("modalBody").innerText = winnerToken === "Tie" ? "The state spaces have balanced out into perfect equilibrium." : `Token matrix path completed successfully by Agent ${winnerToken}.`;
+            document.getElementById("endModal").style.display = "flex";
+        }
+
+        function triggerGridReset() {
+            board = [" ", " ", " ", " ", " ", " ", " ", " ", " "];
+            currentActiveToken = "X";
+            isInterfaceLocked = false;
+            
+            // Wipe Canvas clean
+            const canvas = document.getElementById("winCanvas");
+            const ctx = canvas.getContext("2d");
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            renderDisplayValues();
+            document.getElementById("turnIndicator").innerText = "X Turn Active";
+            document.getElementById("endModal").style.display = "none";
+        }
+    </script>
+</body>
+</html>
